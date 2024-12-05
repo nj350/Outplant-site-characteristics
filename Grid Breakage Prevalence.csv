@@ -1,0 +1,5 @@
+Species,Site,Array,Initial.n,n,n.broken,Breakage.Prev
+ACER,North Hub,G26,50,18,3,6
+ACER,North Hub,G27,50,31,13,26
+ACER,South Hub,G28,50,26,5,10
+ACER,South Hub,G29,50,30,7,14

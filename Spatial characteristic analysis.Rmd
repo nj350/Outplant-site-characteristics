@@ -1,0 +1,203 @@
+---
+title: "Spatial characteristic analysis"
+author: "Nick Jones"
+date: "2024-04-19"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE)
+```
+
+```{r, include=FALSE}
+library(dplyr)
+library(ggplot2)
+library(plotrix)
+library(tidyverse)
+library(stringr)
+library(moments)
+library(vegan)
+library(randomForest)
+library(glmmTMB)
+library(emmeans)
+library(performance)
+library(DHARMa)
+```
+
+```{r}
+
+predictors <- read.csv("C:\\Users\\nj350\\OneDrive - Nova Southeastern University\\Documents\\Grants and Funding\\2023\\FY 24 DEP Restoration Hub\\Data\\Site Data\\All Predictors.csv", header = T)
+
+clusters <- read.csv("C:\\Users\\nj350\\OneDrive - Nova Southeastern University\\Documents\\Grants and Funding\\2023\\FY 24 DEP Restoration Hub\\Data\\Outplant Data\\Data Summaries\\Site Survival Prevalence.csv", header = T)
+
+grids <- read.csv("C:\\Users\\nj350\\OneDrive - Nova Southeastern University\\Documents\\Grants and Funding\\2023\\FY 24 DEP Restoration Hub\\Data\\Outplant Data\\Data Summaries\\Grid Site Survival Prevalence.csv", header = T)
+
+predictors$Site <- as.factor(predictors$Site)
+clusters$Site <- as.factor(clusters$Site)
+grids$Site <- as.factor(grids$Site)
+
+clusters$Species <- as.factor(clusters$Species)
+grids$Species <- as.factor(grids$Species)
+
+```
+
+### Data manipulation and summarise data by site
+ 
+```{r}
+
+site.predictors <- predictors %>% group_by(Site) %>%
+  summarise(LatDD = mean(LatDD), 
+            Depth = mean(Depth),
+            Shore = mean(Distance.to.Shore),
+            Port = mean(Distance.to.Port))
+  
+acer.surv.data <- rbind(clusters, grids) %>%
+subset(Species == "ACER" & Period == "1 Year") 
+
+levels(acer.surv.data$Site)
+levels(site.predictors$Site)
+
+acer.surv.data <- left_join(site.predictors, acer.surv.data, by = "Site")
+
+reef.build.data <- rbind(clusters, grids) %>%
+  subset(Species == "MCAV" | 
+         Species == "DLAB"|
+           Species == "PCLI"|
+           Species == "PSTR"|
+           Species == "CNAT"|
+           Species == "OFAV"|
+           Species == "SBOU"|
+           Species == "SINT"|
+           Species == "SSID") %>%
+  subset(Period == "1 Year" & Initial.n > 2)
+
+reef.build.data <- left_join(reef.build.data, site.predictors, by = "Site")
+
+brooders <- rbind(clusters, grids) %>%
+  subset(Species == "AAGA" |
+           Species == "PAST"|
+           Species == "PPOR")%>%
+  subset(Period == "1 Year" & Initial.n > 2)
+
+brooders <- left_join(brooders, site.predictors, by = "Site")
+
+```
+
+### ACER sites
+
+```{r}
+
+ggplot(acer.surv.data)+
+  geom_point(aes(x = LatDD, y = Survival.Prev))
+
+ggplot(acer.surv.data)+
+  geom_point(aes(x = Depth, y = Survival.Prev))
+
+ggplot(acer.surv.data)+
+  geom_point(aes(x = Port, y = Survival.Prev))
+
+ggplot(acer.surv.data)+
+  geom_point(aes(x = Shore, y = Survival.Prev))
+
+hist(acer.surv.data$Survival.Prev)
+
+mod.1 <- glm(Survival.Prev/100 ~ LatDD, weights = n, family = binomial, data = acer.surv.data)
+mod.2 <- glm(Survival.Prev/100 ~ Depth, weights = n, family = binomial, data = acer.surv.data)
+mod.3 <- glm(Survival.Prev/100 ~ Port, weights = n, family = binomial, data = acer.surv.data)
+mod.4 <- glm(Survival.Prev/100 ~ Shore, weights = n, family = binomial, data = acer.surv.data)
+
+AIC(mod.1, mod.2, mod.3, mod.4)
+
+mod.5 <- glm(Survival.Prev/100 ~ Shore * Port, weights = n, family = binomial, data = acer.surv.data)
+mod.6 <- glm(Survival.Prev/100 ~ Shore + Port, weights = n, family = binomial, data = acer.surv.data)
+
+AIC(mod.3, mod.5, mod.6)
+
+acer.fit <- glm(Survival.Prev/100 ~ Shore + Port, weights = n, family = binomial, data = acer.surv.data)
+
+summary(acer.fit)
+
+plot(acer.fit) #qqplot looks fine, reasonably big spread in residuals and there are a few points that are very influential (exp4, exp5, south hub)- but so few points so not much can be done. 
+#Leverage refers to the extent to which the coefficients in the regression model would change if a particular observation was removed from the dataset.
+#Standardized residuals refer to the standardized difference between a predicted value for an observation and the actual value of the observation.
+
+plot(residuals(acer.fit)~ fitted(acer.fit)) #even but big spread
+
+pred.acer <- predict(acer.fit)
+pred.acer <- data.frame(acer.surv.data, pred.acer)
+
+ggplot(pred.acer)+
+  geom_point(aes(x = Port, y = pred.acer))
+
+ggplot(pred.acer)+
+  geom_point(aes(x = Shore, y = pred.acer))
+
+```
+### Reef building species sites
+
+```{r}
+
+ggplot(reef.build.data)+
+  geom_point(aes(x = LatDD, y = Survival.Prev))
+
+ggplot(reef.build.data)+
+  geom_point(aes(x = Depth, y = Survival.Prev, colour = Species))
+
+ggplot(reef.build.data)+
+  geom_point(aes(x = Port, y = Survival.Prev))
+
+ggplot(reef.build.data)+
+  geom_point(aes(x = Shore, y = Survival.Prev))
+
+reef.build.data2 <- subset(reef.build.data, Survival.Prev > 12) #evidence of outlier where very low SBOU survival at exp5
+
+mod.1 <- glmmTMB(Survival.Prev/100 ~ LatDD + (1|Species), weights = n, family = binomial, data = reef.build.data2)
+mod.2 <- glmmTMB(Survival.Prev/100 ~ Depth+ (1|Species), weights = n, family = binomial, data = reef.build.data2)
+mod.3 <- glmmTMB(Survival.Prev/100 ~ Port+ (1|Species), weights = n, family = binomial, data = reef.build.data2)
+mod.4 <- glmmTMB(Survival.Prev/100 ~ Shore+ (1|Species), weights = n, family = binomial, data = reef.build.data2)
+
+AIC(mod.1, mod.2, mod.3, mod.4)
+
+summary(mod.1) #mod 1 best
+
+mod.5 <- glmmTMB(Survival.Prev/100 ~ LatDD * Depth, weights = n, family = binomial, data = reef.build.data2)
+mod.6 <- glmmTMB(Survival.Prev/100 ~ LatDD + Depth, weights = n, family = binomial, data = reef.build.data2)
+
+AIC(mod.1, mod.5, mod.6)
+
+reef.fit <- glmmTMB(Survival.Prev/100 ~ LatDD+ (1|Species), weights = n, family = binomial, data = reef.build.data2)
+
+summary(reef.fit)
+
+pred.reef <- predict(reef.fit)
+pred.reef <- data.frame(reef.build.data2, pred.reef)
+
+ggplot(pred.reef)+
+  geom_point(aes(x = LatDD, y = pred.reef)) #suggests declining survival with latitude when accounting for species variability
+
+sims <- simulateResiduals(reef.fit, n = 1000)
+plot(sims) #evidence of lack of unifrmity in resid distribution
+testUniformity(sims) #ks off but not completely horrendous
+testDispersion(sims) #dispersion fine
+testOutliers(sims, type = "bootstrap") #fine
+
+r2(reef.fit)
+
+```
+### Brooders sites - not enough to model
+
+```{r}
+
+ggplot(brooders)+
+  geom_point(aes(x = LatDD, y = Survival.Prev))
+
+ggplot(brooders)+
+  geom_point(aes(x = Depth, y = Survival.Prev))
+
+ggplot(brooders)+
+  geom_point(aes(x = Port, y = Survival.Prev))
+
+ggplot(brooders)+
+  geom_point(aes(x = Shore, y = Survival.Prev))
+```
+

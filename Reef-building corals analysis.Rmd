@@ -1,0 +1,450 @@
+---
+title: "Reef-building Outplants Model"
+author: "Nick Jones"
+date: "2024-05-08"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE)
+```
+
+```{r, include=FALSE}
+library(dplyr)
+library(ggplot2)
+library(plotrix)
+library(tidyverse)
+library(stringr)
+library(moments)
+library(vegan)
+library(randomForest)
+library(varImp)
+library(pdp)
+library(MESS)
+library(glmmTMB)
+library(DHARMa)
+library(emmeans)
+library(performance)
+library(corrplot)
+library(lattice)
+library(sjPlot)
+```
+
+```{r}
+
+predictors <- read.csv("C:\\Users\\nj350\\OneDrive - Nova Southeastern University\\Documents\\Grants and Funding\\2023\\FY 24 DEP Restoration Hub\\Data\\Site Data\\All Predictors.csv", header = T)
+
+clusters <- read.csv("C:\\Users\\nj350\\OneDrive - Nova Southeastern University\\Documents\\Grants and Funding\\2023\\FY 24 DEP Restoration Hub\\Data\\Outplant Data\\Data Summaries\\Array Survival Prevalence.csv", header = T)
+
+fwc <- read.csv("C:\\Users\\nj350\\OneDrive - Nova Southeastern University\\Documents\\Grants and Funding\\2023\\FY 24 DEP Restoration Hub\\Data\\Outplant Data\\Data Summaries\\FWC Bases.csv", header = T)
+
+breakage <- read.csv("C:\\Users\\nj350\\OneDrive - Nova Southeastern University\\Documents\\Grants and Funding\\2023\\FY 24 DEP Restoration Hub\\Data\\Outplant Data\\Data Summaries\\Array Breakage Prevalence.csv", header = T)
+
+grids <- read.csv("C:\\Users\\nj350\\OneDrive - Nova Southeastern University\\Documents\\Grants and Funding\\2023\\FY 24 DEP Restoration Hub\\Data\\Outplant Data\\Data Summaries\\Grid Array Survival Prevalence.csv", header = T)
+
+```
+
+### Data manipulation for analysis
+
+```{r}
+
+predictors$Site <- as.factor(predictors$Site)
+clusters$Site <- as.factor(clusters$Site)
+grids$Site <- as.factor(grids$Site)
+
+clusters$Species <- as.factor(clusters$Species)
+grids$Species <- as.factor(grids$Species)
+
+fwc$Survival.Prev <- fwc$Survival.Prev*100
+
+survival <- rbind(clusters, grids, fwc) %>%
+  subset(Period != "0 Year")
+
+survival <- left_join(predictors, survival, by = c("Site", "Array"))
+
+###remove collinear variables
+
+survival <- survival %>%
+  select(c(-17,-19))
+
+```
+
+### Data analysis in 2 stage process - first random forest, then GLMM using most important variables
+### Random Forest analysis - ACER survival 1 year
+
+```{r}
+
+all.pred <- predictors %>%
+  select(c(5, 10:28))
+
+#check if correlation coefficient over 90 and remove one of the collinear variables
+M <- cor(all.pred, method = "spearman") #spearman good for non-normal data with outliers
+#remove LONDD (collinear with LatDD), mean.length (collinear with CV), kurtosis (collinear with skew)
+corrplot(M, method = 'number')
+
+```
+
+
+```{r}
+reef.builders <- survival %>% subset(Species != "ACER" & Period == "1 Year")
+reef.builders$Species <- droplevels(reef.builders$Species)
+reef.builders$Method <- as.factor(reef.builders$Method)
+reef.builders$Cluster <- as.factor(reef.builders$Cluster)
+
+summary(reef.builders$Survival.Prev) #big range in 1 year survival
+
+set.seed(1985)
+
+forest.1 <- randomForest(Survival.Prev ~ Species + n.x + Skew + CV + H + J + Sp.rich + 
+                           Rugosity + Sed.max + Sed.mean + Relief.max + Relief.mean +
+                           Distance.to.Shore + LatDD + Distance.to.Port + Depth + Cluster + Method,
+                         data = reef.builders, importance = T,
+                         replace = T, ntree = 1000)
+
+plot(forest.1) #displays cross validation error rate against the number of trees to assess whether the forest is reliable
+print(forest.1) #R2 = 22.56
+
+#survival predictions of the random forest at each array based upon model
+p.rf <- predict(forest.1, newdata=reef.builders)
+length(unique(p.rf))
+
+#calculate the root mean squared error using the out of bag predictions- how far predicted values are from observed values in the regression analysis (how concentrated the data are around line of best fit)
+#summarises how different the fitted predictions are with the actual data, quantiles and extremes are - rpp cntains each data point comparison
+summary(r.rpp <- reef.builders$Survival.Prev - p.rf) #mean is good, extremes off, low survival is overestimated, high survival is underestimated
+
+rmse.rf <- sqrt(sum(r.rpp^2)/length(r.rpp)) #sqrt of the sum of squareds/length = distance between actual and predicted values - 11.4%
+
+summary(reef.builders$Survival.Prev)
+summary(p.rf) #model is more conservative - lower values quite a way off, mean and median good
+
+#Plot predicted vs actual values
+ggplot(reef.builders, aes(x = Survival.Prev, y = p.rf)) +
+         geom_point() +
+  geom_abline()+
+         labs(x = "Actual", y = "Fitted")+
+         scale_y_continuous(limits = c(0,100))+
+         scale_x_continuous(limits = c(0,100)) #actually looks pretty good, underestimates mortality at low values
+
+set.seed(2509)
+forest.2 <- randomForest(Survival.Prev ~ Species + n.x + Skew + CV + H + J + Sp.rich + 
+                           Rugosity + Sed.max + Sed.mean + Relief.max + Relief.mean +
+                           Distance.to.Shore + LatDD + Distance.to.Port + Depth + Cluster + Method,
+                         data = reef.builders, importance = T,
+                         replace = T, ntree = 1000)
+
+round(importance(forest.2),2)
+print(forest.2) #22.8
+
+p.rf2 <- predict(forest.2, newdata=reef.builders)
+length(unique(p.rf))
+
+summary(r.rpp <- reef.builders$Survival.Prev - p.rf2)
+
+ggplot(reef.builders, aes(x = Survival.Prev, y = p.rf2)) +
+         geom_point(aes(colour = Site)) +
+  geom_abline()+
+         labs(x = "Actual", y = "Fitted")+
+         scale_y_continuous(limits = c(0,100))+
+         scale_x_continuous(limits = c(0,100)) #pretty good, apart from the very low survival of SBOU at exp5
+
+```
+### Extract Variable Importance
+
+```{r}
+
+#extracts variable importance
+imp1 <- as.data.frame(round(importance(forest.1), 2)) #extracts variable importance
+imp1$Var.Names <- row.names(imp1)
+imp2 <- as.data.frame(round(importance(forest.2), 2))
+imp2$Var.Names <- row.names(imp2)
+importance <- full_join(imp1, imp2, by = "Var.Names") #joins var importance from both models
+names(importance) <- c("Imp1", "Node.1", "Var.Names", "Imp2", "Node.2")
+importance$Imp <- (importance$Imp1+importance$Imp2)/2
+importance.order <- importance[order(-importance$Imp),] #orders variable importance 
+cumsumbinning(importance.order$Imp, threshold = (sum(importance$Imp)*0.75), cutwhenpassed = T) #use first 9 variables
+#looks at cutoffs at 75% total variable importance explained (e.g. vars with a 1 are in the top 75%, 2 and above are less important)
+importance.order
+mean(forest.1$mse) 
+sum(importance$Imp)
+
+#so R2 not high but we're looking to identify the most important variables
+
+ggplot(importance, aes(x=Var.Names,  y=Imp)) +
+  geom_segment(aes(x=reorder(Var.Names,Imp), xend=Var.Names, y=0, yend=Imp), color="grey") +
+  geom_point(aes(color=Imp), size = 5) +
+  labs(y = bquote("%IncMSE"))+
+  theme_light() +
+  coord_flip()+
+  theme_classic()+
+  theme(axis.text.y = element_text(size = 12, colour = "black"), 
+        axis.title.y = element_blank(), 
+        axis.text.x = element_text(size = 12, colour = "black"), 
+        axis.title.x = element_text(size = 14),
+        axis.line = element_line(linewidth = 1), 
+        axis.ticks = element_blank(),legend.position="")+
+  scale_color_continuous(type= "viridis") 
+#species, latdd, coral abundance, rugosity, mean relief most important, then distance from shore/port, then J and CV
+
+```
+### Re-run with the chosen variables that account for 75% of variation
+```{r}
+
+set.seed(25091985)
+
+forest.3 <- randomForest(Survival.Prev ~ Species + LatDD +  n.x + Rugosity +
+                           Relief.mean + Distance.to.Shore + Distance.to.Port + J + CV,
+                         data = reef.builders, importance = T,
+                         replace = T, ntree = 1000) 
+
+round(importance(forest.3),2)
+print(forest.3) #22.7%
+plot(forest.3)
+
+imp3 <- as.data.frame(round(importance(forest.3), 2))
+imp3$Var.Names <- row.names(imp3)
+names(imp3) <- c("Imp", "Node", "Var.Names")
+imp3 <- imp3[order(-imp3$Imp),] #orders variable importance 
+
+cumsumbinning(imp3$Imp, threshold = (sum(imp3$Imp)*0.75), cutwhenpassed = T) #use first 6 variables
+
+forest.4 <- randomForest(Survival.Prev ~ Species + LatDD +  n.x + Rugosity +
+                           Relief.mean + Distance.to.Shore,
+                         data = reef.builders, importance = T,
+                         replace = T, ntree = 1000) 
+
+round(importance(forest.4),2)
+print(forest.4) #27.0%
+plot(forest.4)
+
+imp4 <- as.data.frame(round(importance(forest.4), 2))
+imp4$Var.Names <- row.names(imp4)
+names(imp4) <- c("Imp", "Node", "Var.Names")
+imp4 <- imp4[order(-imp4$Imp),] #orders variable importance 
+
+cumsumbinning(imp4$Imp, threshold = (sum(imp4$Imp)*0.75), cutwhenpassed = T) #use first 6 variables
+
+p.rf4 <- predict(forest.4, newdata=reef.builders)
+summary(r.rpp <- reef.builders$Survival.Prev - p.rf4) #extreme values off but mean is close and 1st and 3rd quantiles close
+
+ggplot(reef.builders, aes(x = Survival.Prev, y = p.rf4)) +
+         geom_point(aes(colour = Site)) +
+  geom_abline()+
+         labs(x = "Actual", y = "Fitted")+
+         scale_y_continuous(limits = c(0,100))+
+         scale_x_continuous(limits = c(0,100)) #looks about the same in terms of accuracy
+
+ggplot(imp4, aes(x=Var.Names,  y=Imp)) +
+  geom_segment(aes(x=reorder(Var.Names,Imp), xend=Var.Names, y=0, yend=Imp), color="grey") +
+  geom_point(aes(color=Imp), size = 5) +
+  labs(y = bquote("%IncMSE"))+
+  theme_light() +
+  coord_flip()+
+  theme_classic()+
+  theme(axis.text.y = element_text(size = 12, colour = "black"), 
+        axis.title.y = element_blank(), 
+        axis.text.x = element_text(size = 12, colour = "black"), 
+        axis.title.x = element_text(size = 14),
+        axis.line = element_line(linewidth = 1), 
+        axis.ticks = element_blank(),legend.position="")+
+  scale_color_continuous(type= "viridis") +
+  scale_x_discrete(labels = c("Rugosity", 
+                              "Mean relief height","Distance from shore",
+                               "Wild coral abundance",  
+                              "Latitude", "Species"))
+
+#ggsave(file = "Boulder survival var imp.png", width = 7, height = 4, dpi = 300)
+
+```
+### Extract those main variables and look at relationship with survival
+
+```{r}
+
+reef.sp <- forest.4 %>%  # the %>% operator is read as "and then"
+  partial(pred.var = "Species", plot.engine = "ggplot2") %>%
+  plotPartial(smooth = TRUE, lwd = 2, ylab = expression(Survival))
+ # large variation in survival by species
+reef.sp
+
+reef.lat <- forest.4 %>%  # the %>% operator is read as "and then"
+  partial(pred.var = "LatDD", plot.engine = "ggplot2") %>%
+  plotPartial(smooth = TRUE, lwd = 2, ylab = expression(Survival))
+ # marked increase in survival above 26.00 deg lat
+reef.lat 
+
+reef.n <- forest.4 %>%  # the %>% operator is read as "and then"
+  partial(pred.var = "n.x", plot.engine = "ggplot2") %>%
+  plotPartial(smooth = TRUE, lwd = 2, ylab = expression(Survival))
+ # linear decrease in survival with abundance once above 100
+reef.n
+
+reef.shore <- forest.4 %>%  # the %>% operator is read as "and then"
+  partial(pred.var = "Distance.to.Shore", plot.engine = "ggplot2") %>%
+  plotPartial(smooth = TRUE, lwd = 2, ylab = expression(Survival))
+ # linear decline in survival with distance from shore
+reef.shore
+
+reef.relief <- forest.4 %>%  # the %>% operator is read as "and then"
+  partial(pred.var = "Relief.mean", plot.engine = "ggplot2") %>%
+  plotPartial(smooth = TRUE, lwd = 2, ylab = expression(Survival))
+ # large increase in survival once relief above 10cm
+reef.relief
+
+reef.rug <- forest.4 %>%  # the %>% operator is read as "and then"
+  partial(pred.var = "Rugosity", plot.engine = "ggplot2") %>%
+  plotPartial(smooth = TRUE, lwd = 2, ylab = expression(Survival))
+ # major increase around 0.9 - basically around mean rugosity, relatively high rugosity or flat areas low survival, fit quadratic
+reef.rug
+summary(predictors$Rugosity)
+
+```
+### GLMM of reef.building species survival using the most important variables to fit model (inc interactions) and then make an equation that predicts survival prevalence
+##### From random forest evidence of quadratic relationship between survival prev and rugosity
+
+```{r}
+
+hist(reef.builders$Survival.Prev)
+
+reef.builders$R2 <- (reef.builders$Rugosity - mean(reef.builders$Rugosity))^2 #quadratic and centred CV
+
+#we know there's loads of species variance but not the main focus therefore fitted as a random effect
+#full model
+mod.1 <- glmmTMB(Survival.Prev/100 ~ LatDD + Distance.to.Shore + Rugosity + 
+                   n.x * Relief.mean * R2 + 
+                   (1|Site) + (1|Species), 
+                 weights = Initial.n, family = binomial, data = reef.builders)
+summary(mod.1) # 3 way interaction was too complex - therefore edited
+r2(mod.1)
+
+```
+### Model selection
+
+```{r, results='hide'}
+
+mod.2 <- glmmTMB(Survival.Prev/100 ~ LatDD + Distance.to.Shore + Rugosity + 
+                   n.x + Relief.mean + R2 +
+                   n.x : Relief.mean + Relief.mean:R2 +  
+                   (1|Site) + (1|Species), 
+                 weights = Initial.n, family = binomial, data = reef.builders)
+summary(mod.2)
+
+mod.3 <- glmmTMB(Survival.Prev/100 ~ LatDD + Distance.to.Shore + Rugosity + 
+                   n.x + Relief.mean + R2 +
+                   n.x : Relief.mean +   
+                   (1|Site) + (1|Species), 
+                 weights = Initial.n, family = binomial, data = reef.builders)
+summary(mod.3)
+
+mod.4 <- glmmTMB(Survival.Prev/100 ~ Distance.to.Shore + Rugosity + 
+                   n.x + Relief.mean + R2 +
+                   n.x : Relief.mean +   
+                   (1|Site) + (1|Species), 
+                 weights = Initial.n, family = binomial, data = reef.builders)
+summary(mod.4)
+
+mod.5 <- glmmTMB(Survival.Prev/100 ~ Rugosity + 
+                   n.x + Relief.mean + R2 +
+                   n.x : Relief.mean +   
+                   (1|Site) + (1|Species), 
+                 weights = Initial.n, family = binomial, data = reef.builders)
+summary(mod.5) #can't really simplify further through backwards selection - could try best approach?
+
+AIC(mod.1, mod.2, mod.3, mod.4, mod.5) #basically equivalent models - use mod.5
+
+```
+### Model Validation
+
+```{r}
+
+mod.fit <- glmmTMB(Survival.Prev/100 ~ Rugosity + 
+                   n.x + Relief.mean + R2 +
+                   n.x : Relief.mean +   
+                   (1|Site) + (1|Species), 
+                 weights = Initial.n, family = binomial, data = reef.builders)
+summary(mod.fit) #negative with rugosity, R2, mean relief, n.x, interaction between n.x and relief.mean
+r2(mod.fit) #0.355, 0.063
+
+sims <- simulateResiduals(mod.fit, n = 1000)
+plot(sims)#not brilliant, uniform, linearity fine, some heterogeneity in residuals
+check_collinearity(mod.fit) # interaction terms only collinear bit. keep all as per recommendations in Zuur et al 2009 and online stat.exchange
+
+testDispersion(sims) #dispersion fine
+testOutliers(sims)# no outliers
+
+e <- resid(mod.fit)
+plot(reef.builders$Relief.mean, e)
+plot(reef.builders$n.x, e)
+plot(reef.builders$Rugosity, e)
+plot(reef.builders$R2, e) #spreads pretty high but dispersion reasonably consistent apart from some high relief values - could remove them
+
+```
+
+```{r}
+
+#extract model predictions and plot interaction
+pred.mod <- predict(mod.fit, type = "response")
+pred.df <- data.frame(reef.builders, pred.mod)
+
+ggplot(pred.df, aes(y = pred.mod, x = R2))+
+  geom_smooth()
+
+library(jtools) 
+library(interactions)
+#https://cran.r-project.org/web/packages/interactions/vignettes/interactions.html
+
+#doesn't like the weights argument so fit this without to test interaction, look at simple model of interactions
+mod.reef <- glmmTMB(Survival.Prev/100 ~ Rugosity + 
+                   n.x + Relief.mean + R2 +
+                   n.x : Relief.mean +   
+                   (1|Site) + (1|Species), family = binomial, data = pred.df)
+
+interact.fig <- interactions::interact_plot(mod.reef, 
+                            pred = n.x, modx = Relief.mean, 
+                            data = pred.df, legend.main = "Mean Relief Height", modx.values = c(8, 15.5, 23),
+                            modx.labels = c("8 cm (-1 SD)", "15.5 cm (Mean)", "23 cm (+1 SD)"))+
+  theme(legend.position = c(0.15,0.2),
+        legend.text = element_text(size = 8, colour = "black"),
+      legend.title = element_text(size = 10, colour = "black"),
+        axis.title.y = element_text(size = 12, colour = "black"),
+        axis.text.y = element_text(size = 10, hjust = 1, colour = "black"),  
+        axis.text.x = element_text(size = 10, hjust = 1, colour = "black"),
+        axis.title.x = element_text(size = 12, colour = "black"),
+        axis.line = element_line(colour = "black", size = 0.5), 
+        panel.border =  element_rect(size = 0.5, colour = "black", fill = NA),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        strip.background = element_blank(),
+        strip.text = element_text(size = 12),
+        panel.background = element_blank())+
+    labs(y = bquote('Survival Probability'), x = "Colony Abundance")
+
+interact.fig
+
+#ggsave(interact.fig, file = "Reef builder survival prevalence.png", width = 7, height = 4, dpi = 300)
+
+mean(pred.df$Relief.mean)
+sd(pred.df$Relief.mean)
+
+interactions::interact_plot(mod.reef, 
+                            pred = Relief.mean, modx = n.x, 
+                            data = pred.df)#survival prevalence declines with n.x at low relief and medium relief, but increases with n.x when relief about average
+
+```
+
+### Forest plot of model
+```{r}
+plot_model(mod.fit, sort.est = T)+
+  theme(legend.position = c(0.15,0.2),
+        legend.text = element_text(size = 8, colour = "black"),
+      legend.title = element_text(size = 10, colour = "black"),
+        axis.title.y = element_text(size = 12, colour = "black"),
+        axis.text.y = element_text(size = 10, hjust = 1, colour = "black"),  
+        axis.text.x = element_text(size = 10, hjust = 1, colour = "black"),
+        axis.title.x = element_text(size = 12, colour = "black"),
+        axis.line = element_line(colour = "black", size = 0.5), 
+        panel.border =  element_rect(size = 0.5, colour = "black", fill = NA),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        strip.background = element_blank(),
+        strip.text = element_text(size = 12),
+        panel.background = element_blank())
+
+```

@@ -1,0 +1,666 @@
+---
+title: "Acropora cervicornis outplant survival analysis"
+author: "Nick Jones"
+date: "2024-04-19"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE)
+```
+
+```{r, include=FALSE}
+library(dplyr)
+library(ggplot2)
+library(plotrix)
+library(tidyverse)
+library(stringr)
+library(moments)
+library(vegan)
+library(randomForest)
+library(varImp)
+library(pdp)
+library(MESS)
+library(glmmTMB)
+library(DHARMa)
+library(emmeans)
+library(performance)
+library(corrplot)
+library(lattice)
+library(sjPlot)
+```
+
+```{r}
+
+predictors <- read.csv("C:\\Users\\nj350\\OneDrive - Nova Southeastern University\\Documents\\Grants and Funding\\2023\\FY 24 DEP Restoration Hub\\Data\\Site Data\\All Predictors.csv", header = T)
+
+clusters <- read.csv("C:\\Users\\nj350\\OneDrive - Nova Southeastern University\\Documents\\Grants and Funding\\2023\\FY 24 DEP Restoration Hub\\Data\\Outplant Data\\Data Summaries\\Array Survival Prevalence.csv", header = T)
+
+fwc <- read.csv("C:\\Users\\nj350\\OneDrive - Nova Southeastern University\\Documents\\Grants and Funding\\2023\\FY 24 DEP Restoration Hub\\Data\\Outplant Data\\Data Summaries\\FWC Bases.csv", header = T)
+
+breakage <- read.csv("C:\\Users\\nj350\\OneDrive - Nova Southeastern University\\Documents\\Grants and Funding\\2023\\FY 24 DEP Restoration Hub\\Data\\Outplant Data\\Data Summaries\\Array Breakage Prevalence.csv", header = T)
+
+grids <- read.csv("C:\\Users\\nj350\\OneDrive - Nova Southeastern University\\Documents\\Grants and Funding\\2023\\FY 24 DEP Restoration Hub\\Data\\Outplant Data\\Data Summaries\\Grid Array Survival Prevalence.csv", header = T)
+
+```
+
+### Data manipulation for analysis
+
+```{r}
+
+predictors$Site <- as.factor(predictors$Site)
+clusters$Site <- as.factor(clusters$Site)
+grids$Site <- as.factor(grids$Site)
+
+clusters$Species <- as.factor(clusters$Species)
+grids$Species <- as.factor(grids$Species)
+
+survival <- rbind(clusters, grids, fwc) %>%
+  subset(Period != "0 Year")
+
+survival <- left_join(predictors, survival, by = c("Site", "Array"))
+
+###remove collinear variables
+
+survival <- survival %>%
+  select(c(-17,-19))
+
+breakage <- left_join(predictors, breakage, by = c("Site", "Array"))
+
+###remove collinear variables
+
+breakage <- breakage %>%
+  select(c(-17,-19))
+
+```
+
+### Data analysis in 2 stage process - first random forest, then GLMM using most important variables
+### Random Forest analysis - ACER survival 1 year
+
+```{r}
+
+all.pred <- predictors %>%
+  select(c(5, 10:28))
+
+#check if correlation coefficient over 90 and remove one of the collinear variables
+M <- cor(all.pred, method = "spearman") #spearman good for non-normal data with outliers
+#remove LONDD (collinear with LatDD), mean.length (collinear with CV), kurtosis (collinear with skew)
+corrplot(M, method = 'number')
+
+```
+
+
+```{r}
+acer <- survival %>% subset(Species == "ACER" & Period == "1 Year")
+acer$Species <- droplevels(acer$Species)
+acer$Method <- as.factor(acer$Method)
+acer$Cluster <- as.factor(acer$Cluster)
+
+set.seed(1985)
+
+forest.1 <- randomForest(Survival.Prev ~ n.x + Acer + Skew + CV + H + J + Sp.rich + 
+                           Rugosity + Sed.max + Sed.mean + Relief.max + Relief.mean +
+                           Distance.to.Shore + LatDD + Distance.to.Port + Depth + Cluster + Method,
+                         data = acer, importance = T,
+                         replace = T, ntree = 1000)
+
+plot(forest.1) #displays cross validation error rate against the number of trees to assess whether the forest is reliable
+print(forest.1) #not explaining much - R2 = 8.14
+
+#survival predictions of the random forest at each array based upon model
+p.rf <- predict(forest.1, newdata=acer)
+length(unique(p.rf))
+
+#calculate the root mean squared error using the out of bag predictions- how far predicted values are from observed values in the regression analysis (how concentrated the data are around line of best fit)
+#summarises how different the fitted predictions are with the actual data, quantiles and extremes are - rpp cntains each data point comparison
+summary(r.rpp <- acer$Survival.Prev - p.rf) #mean is good, extremes off, low survival is overestimated, high survival is underestimated
+
+rmse.rf <- sqrt(sum(r.rpp^2)/length(r.rpp)) #sqrt of the sum of squareds/length = distance between actual and predicted values
+
+summary(acer$Survival.Prev)
+summary(p.rf) #model is more conservative - lower values quite a way off, mean and median good
+
+#Plot predicted vs actual values
+ggplot(acer, aes(x = Survival.Prev, y = p.rf)) +
+         geom_point() +
+  geom_abline()+
+         labs(x = "Actual", y = "Fitted")+
+         scale_y_continuous(limits = c(0,100))+
+         scale_x_continuous(limits = c(0,100)) #actually looks pretty good, underestimates mortality at low values
+
+set.seed(2509)
+forest.2 <- randomForest(Survival.Prev ~ n.x + Acer + Skew + CV + H + J + Sp.rich + 
+                           Rugosity + Sed.max + Sed.mean + Relief.max + Relief.mean +
+                           Distance.to.Shore + LatDD + Distance.to.Port + Depth + Cluster + Method,
+                         data = acer, importance = T,
+                         replace = T, ntree = 1000)
+
+round(importance(forest.2),2)
+print(forest.2) #5.49
+
+p.rf2 <- predict(forest.2, newdata=acer)
+length(unique(p.rf))
+
+summary(r.rpp <- acer$Survival.Prev - p.rf)
+
+ggplot(acer, aes(x = Survival.Prev, y = p.rf2)) +
+         geom_point(aes(colour = Site)) +
+  geom_abline()+
+         labs(x = "Actual", y = "Fitted")+
+         scale_y_continuous(limits = c(0,100))+
+         scale_x_continuous(limits = c(0,100)) #actually looks pretty good, underestimates mortality at low values
+
+```
+
+### Extract Variable Importance
+
+```{r}
+
+#extracts variable importance
+imp1 <- as.data.frame(round(importance(forest.1), 2)) #extracts variable importance
+imp1$Var.Names <- row.names(imp1)
+imp2 <- as.data.frame(round(importance(forest.2), 2))
+imp2$Var.Names <- row.names(imp2)
+importance <- full_join(imp1, imp2, by = "Var.Names") #joins var importance from both models
+names(importance) <- c("Imp1", "Node.1", "Var.Names", "Imp2", "Node.2")
+importance$Imp <- (importance$Imp1+importance$Imp2)/2
+importance.order <- importance[order(-importance$Imp),] #orders variable importance 
+cumsumbinning(importance.order$Imp, threshold = (sum(importance$Imp)*0.75), cutwhenpassed = T) #use first 7 variables
+#looks at cutoffs at 75% total variable importance explained (e.g. vars with a 1 are in the top 75%, 2 and above are less important)
+importance.order
+mean(forest.1$mse) 
+sum(importance$Imp)
+
+#so R2 not high but we're looking to identify the most important variables
+
+ggplot(importance, aes(x=Var.Names,  y=Imp)) +
+  geom_segment(aes(x=reorder(Var.Names,Imp), xend=Var.Names, y=0, yend=Imp), color="grey") +
+  geom_point(aes(color=Imp), size = 5) +
+  labs(y = bquote("%IncMSE"))+
+  theme_light() +
+  coord_flip()+
+  theme_classic()+
+  theme(axis.text.y = element_text(size = 12, colour = "black"), 
+        axis.title.y = element_blank(), 
+        axis.text.x = element_text(size = 12, colour = "black"), 
+        axis.title.x = element_text(size = 14),
+        axis.line = element_line(linewidth = 1), 
+        axis.ticks = element_blank(),legend.position="")+
+  scale_color_continuous(type= "viridis") 
+#Outplant method/cluster, distance to shore, Relief Mean, CV, Sp.rich, distance to Port
+
+```
+### Re-run with the chosen variables that account for 75% of variation
+```{r}
+
+set.seed(25091985)
+
+forest.3 <- randomForest(Survival.Prev ~ CV + Sp.rich +  
+                           Relief.mean + Distance.to.Shore + Distance.to.Port + Cluster + Method,
+                         data = acer, importance = T,
+                         replace = T, ntree = 1000) #explains 28.41% of the variation
+
+round(importance(forest.3),2)
+print(forest.3)
+
+p.rf3 <- predict(forest.3, newdata=acer)
+summary(r.rpp <- acer$Survival.Prev - p.rf3) #extreme values off but mean is close and 1st and 3rd quantiles close
+
+ggplot(acer, aes(x = Survival.Prev, y = p.rf3)) +
+         geom_point(aes(colour = Site)) +
+  geom_abline()+
+         labs(x = "Actual", y = "Fitted")+
+         scale_y_continuous(limits = c(0,100))+
+         scale_x_continuous(limits = c(0,100)) #looks about the same in terms of accuracy
+
+imp3 <- as.data.frame(round(importance(forest.3), 2))
+imp3$Var.Names <- row.names(imp3)
+names(imp3) <- c("Imp", "Node.3", "Var.Names")
+
+ggplot(imp3, aes(x=Var.Names,  y=Imp)) +
+  geom_segment(aes(x=reorder(Var.Names,Imp), xend=Var.Names, y=0, yend=Imp), color="grey") +
+  geom_point(aes(color=Imp), size = 5) +
+  labs(y = bquote("%IncMSE"))+
+  theme_light() +
+  coord_flip()+
+  theme_classic()+
+  theme(axis.text.y = element_text(size = 12, colour = "black"), 
+        axis.title.y = element_blank(), 
+        axis.text.x = element_text(size = 12, colour = "black"), 
+        axis.title.x = element_text(size = 14),
+        axis.line = element_line(linewidth = 1), 
+        axis.ticks = element_blank(),legend.position="")+
+  scale_color_continuous(type= "viridis")+
+  scale_x_discrete(labels = c("Species Richness",  "Coefficient of variation", 
+                              "Mean relief height","Fragment number",
+                               "Distance from port",  
+                              "Distance from shore", "Attachment method"))
+
+#ggsave(file = "ACER survival var imp.png", width = 7, height = 4, dpi = 300)
+
+```
+
+### Extract those main variables and look at relationship with survival
+
+```{r}
+
+acer.shore <- forest.3 %>%  # the %>% operator is read as "and then"
+  partial(pred.var = "Distance.to.Shore", plot.engine = "ggplot2") %>%
+  plotPartial(smooth = TRUE, lwd = 2, ylab = expression(Survival))
+ # survival drops off markedly with distance to shore (the hubs)
+acer.shore
+
+acer.cv <- forest.3 %>%  # the %>% operator is read as "and then"
+  partial(pred.var = "CV", plot.engine = "ggplot2") %>%
+  plotPartial(smooth = TRUE, lwd = 2, ylab = expression(Survival))
+ # increase with CV - some large colonies about - quadratic?
+acer.cv 
+
+acer.port <- forest.3 %>%  # the %>% operator is read as "and then"
+  partial(pred.var = "Distance.to.Port", plot.engine = "ggplot2") %>%
+  plotPartial(smooth = TRUE, lwd = 2, ylab = expression(Survival))
+ # linear increase with distance from the port although differences are small
+acer.port
+
+acer.sp <- forest.3 %>%  # the %>% operator is read as "and then"
+  partial(pred.var = "Sp.rich", plot.engine = "ggplot2") %>%
+  plotPartial(smooth = TRUE, lwd = 2, ylab = expression(Survival))
+ # declines as diversity increases (hubs?) - not convinced by it looking at the data- use quadratic
+acer.sp
+
+acer.relief <- forest.3 %>%  # the %>% operator is read as "and then"
+  partial(pred.var = "Relief.mean", plot.engine = "ggplot2") %>%
+  plotPartial(smooth = TRUE, lwd = 2, ylab = expression(Survival))
+ # highest at mean relief - use quadratic?
+acer.relief
+
+#check interactions
+acer.cv.sp <- partial(forest.3, pred.var = c("CV", "Sp.rich"), chull=T, plot.engine = "ggplot2")
+
+# Default PDP
+ plotPartial(acer.cv.sp)
+
+
+```
+
+### GLMM of ACER using the most important variables to fit model (inc interactions) and then make an equation that predicts survival prevalence
+##### From random forest evidence of quadratic relationship between survival prev and CV, relief mean and species richness in particular
+
+```{r, results='hide'}
+
+hist(acer$Survival.Prev)
+
+acer$CV2 <- (acer$CV - mean(acer$CV))^2 #quadratic and centred CV
+acer$R2 <- (acer$Relief.mean - mean(acer$Relief.mean))^2 #quadratic and centred CV
+acer$S2 <- (acer$Sp.rich - mean(acer$Sp.rich))^2
+
+mod.1 <- glmmTMB(Survival.Prev/100 ~ CV + Relief.mean +Sp.rich + CV2 + R2 + S2 + CV: Relief.mean+ Relief.mean: Sp.rich + CV:Sp.rich + 
+                  Distance.to.Shore + Distance.to.Port + Cluster + Method +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+summary(mod.1) # 3 way interaction was too complex - therefore edited
+
+
+mod.2 <- glmmTMB(Survival.Prev/100 ~ CV + Relief.mean + Sp.rich + CV * Relief.mean + CV2 + R2 + S2 + 
+                   Distance.to.Shore + Distance.to.Port + Cluster + Method +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+summary(mod.2)
+
+mod.3 <- glmmTMB(Survival.Prev/100 ~ CV + Relief.mean + Sp.rich + CV2 + R2 + S2 + Relief.mean * Sp.rich + 
+                   Distance.to.Shore + Distance.to.Port + Cluster + Method +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+summary(mod.3)
+
+mod.4 <- glmmTMB(Survival.Prev/100 ~ CV + Relief.mean + Sp.rich + CV  * Sp.rich + CV2 + R2 + S2 + 
+                   Distance.to.Shore + Distance.to.Port + Cluster + Method +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+
+AIC(mod.1, mod.2, mod.3, mod.4) #carry on with mod.4
+
+summary(mod.4)
+### now use best approach with all possible model combos
+
+mod.5 <- glmmTMB(Survival.Prev/100 ~ CV + Relief.mean +Sp.rich +  CV * Sp.rich + CV2 + R2 + S2 + R2:CV2 +
+                   Distance.to.Shore + Distance.to.Port + Cluster + Method +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+
+AIC(mod.1, mod.5)
+
+mod.5a <- glmmTMB(Survival.Prev/100 ~ CV + Relief.mean +Sp.rich +  CV * Sp.rich + CV2 + R2 + S2 + R2:CV2 +
+                  Distance.to.Port + Cluster + Method +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+
+mod.5b <- glmmTMB(Survival.Prev/100 ~ CV + Relief.mean +Sp.rich +  CV * Sp.rich + CV2 + R2 + S2 + R2:CV2 +
+                  Cluster + Method +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+
+mod.5c <- glmmTMB(Survival.Prev/100 ~ CV + Relief.mean +Sp.rich +  CV * Sp.rich + CV2 + R2 + S2 +
+                 Distance.to.Port + Cluster + Method +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+
+mod.5d <- glmmTMB(Survival.Prev/100 ~ CV + Sp.rich +  CV * Sp.rich + CV2 + R2 + S2 +
+                  Cluster + Method +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+
+mod.6 <- glmmTMB(Survival.Prev/100 ~ CV + Relief.mean +Sp.rich +  CV * Relief.mean + CV2 + R2 + S2+ 
+                   Distance.to.Shore + Distance.to.Port +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+
+mod.7 <- glmmTMB(Survival.Prev/100 ~ CV + Relief.mean +Sp.rich +  CV * Relief.mean + CV2 + R2 + S2 + 
+                   Distance.to.Shore + Method +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+
+mod.8 <- glmmTMB(Survival.Prev/100 ~ CV + Relief.mean +Sp.rich +  CV * Relief.mean + CV2 + R2 + S2 + 
+                   Distance.to.Port + Method +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+
+mod.9 <- glmmTMB(Survival.Prev/100 ~ CV + Relief.mean +CV * Relief.mean + CV2 + R2 + S2 + 
+                   Distance.to.Shore + Distance.to.Port + Method +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+
+mod.10 <- glmmTMB(Survival.Prev/100 ~ CV + Relief.mean +Sp.rich +  CV * Relief.mean + CV2 + R2 + S2 +
+                   Distance.to.Shore + 
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+
+mod.11 <- glmmTMB(Survival.Prev/100 ~ CV + Relief.mean +Sp.rich +  CV * Relief.mean + CV2 + R2 + S2 +
+                    (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+
+mod.12 <- glmmTMB(Survival.Prev/100 ~ CV + Relief.mean +CV * Relief.mean + CV2 + R2 + 
+                   
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+
+mod.13 <- glmmTMB(Survival.Prev/100 ~ CV + Relief.mean +Sp.rich +  CV * Relief.mean + CV2 + S2 + 
+                   Distance.to.Port + 
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+
+mod.14 <- glmmTMB(Survival.Prev/100 ~ CV + Relief.mean +CV * Relief.mean + R2 + S2 + 
+                   Distance.to.Shore + Distance.to.Port + 
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+
+mod.15 <- glmmTMB(Survival.Prev/100 ~ CV + Relief.mean + Sp.rich +  CV * Relief.mean +  
+                   Method +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+
+mod.16 <- glmmTMB(Survival.Prev/100 ~ CV + Relief.mean +CV * Relief.mean + CV2 + R2 + S2 + 
+                   Distance.to.Shore + Method +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+
+mod.17 <- glmmTMB(Survival.Prev/100 ~ CV + Relief.mean + CV * Relief.mean + CV2 + R2 + S2 + 
+                  Distance.to.Port + Method +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+
+mod.18 <- glmmTMB(Survival.Prev/100 ~ CV + Relief.mean + CV * Relief.mean + CV2 + R2 + S2+ 
+                   Distance.to.Shore+
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+
+mod.19 <- glmmTMB(Survival.Prev/100 ~ CV + Relief.mean + CV * Relief.mean + CV2 + R2 + S2 + 
+                   Distance.to.Port + Method +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+
+###
+
+mod.20 <- glmmTMB(Survival.Prev/100 ~ CV + Relief.mean +Sp.rich +  CV * Sp.rich + CV2 + R2 + S2 + 
+                   Distance.to.Shore + Distance.to.Port + Method +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+
+mod.20a <- glmmTMB(Survival.Prev/100 ~ CV + Relief.mean +Sp.rich +  CV * Sp.rich + CV2 + R2 + S2 + 
+                   Distance.to.Shore + Distance.to.Port + Method + Cluster +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+
+mod.20b <- glmmTMB(Survival.Prev/100 ~ CV + Relief.mean +Sp.rich +  CV * Sp.rich + CV2 + R2 + S2 + 
+                   Distance.to.Shore + Method +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+summary(mod.20b)
+mod.21 <- glmmTMB(Survival.Prev/100 ~ CV + Relief.mean +Sp.rich +  CV * Sp.rich + CV2 + R2 + S2 + 
+                   Distance.to.Shore + Distance.to.Port +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+
+mod.22 <- glmmTMB(Survival.Prev/100 ~ CV + Relief.mean +Sp.rich +  CV * Sp.rich + CV2 + R2 + S2 + 
+                   Distance.to.Shore + Method +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+
+mod.22a <- glmmTMB(Survival.Prev/100 ~ CV + Relief.mean + R2 + Sp.rich +  CV * Sp.rich + CV2 + R2 + S2 + 
+                   Distance.to.Shore + Method +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+
+mod.23 <- glmmTMB(Survival.Prev/100 ~ CV + Relief.mean +Sp.rich +  CV * Sp.rich + CV2 + R2 + S2 + 
+                   Distance.to.Port + Method +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+
+mod.24 <- glmmTMB(Survival.Prev/100 ~ CV + Sp.rich +CV2 * S2 + 
+                   Distance.to.Shore + Distance.to.Port + Method +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+
+mod.25 <- glmmTMB(Survival.Prev/100 ~ CV + Relief.mean +Sp.rich +  CV * Sp.rich + CV2 + R2 + S2 + 
+                   Distance.to.Shore + 
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+
+mod.26 <- glmmTMB(Survival.Prev/100 ~ CV + Relief.mean +Sp.rich +  CV * Sp.rich + CV2 + R2 + S2 + 
+                    (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+
+mod.27 <- glmmTMB(Survival.Prev/100 ~ CV + Sp.rich +CV * Sp.rich + CV2 + R2 + S2 + 
+                   
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+
+mod.28 <- glmmTMB(Survival.Prev/100 ~ CV + Relief.mean +Sp.rich +  CV * Sp.rich + CV2 + R2 + S2 + 
+                   Distance.to.Port + 
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+
+mod.29 <- glmmTMB(Survival.Prev/100 ~ CV + Sp.rich +CV * Sp.rich + CV2 + R2 + S2 + 
+                   Distance.to.Shore + Distance.to.Port + 
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+
+mod.30 <- glmmTMB(Survival.Prev/100 ~ CV + Relief.mean + Sp.rich +  CV * Sp.rich + CV2 + R2 + S2 + 
+                   Method +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+
+mod.31 <- glmmTMB(Survival.Prev/100 ~ CV + Sp.rich +CV * Sp.rich + CV2 + R2 + S2 + 
+                   Distance.to.Shore + Method +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+
+mod.32 <- glmmTMB(Survival.Prev/100 ~ CV + Sp.rich + CV * Sp.rich + CV2 + R2 + S2 + 
+                  Distance.to.Port + Method +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+
+mod.33 <- glmmTMB(Survival.Prev/100 ~ CV + Sp.rich + CV * Sp.rich + CV2 + R2 + S2+ 
+                   Distance.to.Shore+
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+
+mod.34 <- glmmTMB(Survival.Prev/100 ~ CV + Sp.rich + CV * Sp.rich + CV2 + R2 + S2 + 
+                   Distance.to.Port + Method +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+
+mod.35 <- glmmTMB(Survival.Prev/100 ~ CV + Sp.rich +  CV * Sp.rich + CV2 + R2 + S2 + 
+                   R2 + Relief.mean + Distance.to.Port + Method +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+
+mod.36 <- glmmTMB(Survival.Prev/100 ~ CV + Sp.rich +  CV * Sp.rich + CV2 + R2 + S2 + 
+                   R2 + Relief.mean + Distance.to.Shore + Distance.to.Port + Method +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+
+mod.37 <- glmmTMB(Survival.Prev/100 ~ CV + Sp.rich +  CV * Sp.rich + CV2 + R2 + S2 + 
+                   Distance.to.Shore + R2 + Relief.mean + Method +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+
+AIC(mod.1, mod.2, mod.4, mod.5, mod.5a, mod.5b, mod.5c, mod.5d, mod.6, mod.7, mod.8, mod.9, mod.10, mod.11, mod.12, mod.13, mod.14, mod.15, mod.16, mod.17, mod.18, mod.19, mod.20, mod.20a, mod.20b, mod.21, mod.22, mod.23, mod.24, mod.25, mod.26, mod.27, mod.28, mod.29, mod.30, mod.31, mod.32, mod.33, mod.34, mod.35, mod.36, mod.37) 
+#full model best 
+
+#mod.4, mod.5c, mod.20a
+
+summary(mod.4)#CV + Relief.mean + Sp.rich + CV * Sp.rich +  CV2 + R2 + S2 + Distance.to.Shore + Distance.to.Port + Cluster +      Method 
+summary(mod.5c) #CV + Relief.mean + Sp.rich + CV * Sp.rich + CV2 + R2 + S2 + Distance.to.Port + Cluster + Method
+summary(mod.20a) #CV + Relief.mean + Sp.rich + CV * Sp.rich + CV2 + R2 + S2 + Distance.to.Shore + Distance.to.Port + Method +      Cluster
+
+AIC(mod.4, mod.5c, mod.20a) #mod.5c is quite a bit better
+```
+
+```{r}
+
+mod.fit <- glmmTMB(Survival.Prev/100 ~ Relief.mean +  CV * Sp.rich + CV2 + R2 + S2 +
+                 Distance.to.Port + Cluster + Method +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer)
+
+summary(mod.fit)
+
+sims <- simulateResiduals(mod.fit, n = 1000)
+plot(sims)
+check_collinearity(mod.fit) # interaction terms only collinear bit. keep all as per recommendations in Zuur et al 2009 and online stat.exchange
+
+testDispersion(sims) #dispersion fine
+testOutliers(sims)# no outliers
+
+e <- resid(mod.fit)
+plot(acer$Distance.to.Port, e) #looking at each independetly like this doesn't indicate problem
+plot(acer$Sp.rich, e)
+plot(acer$S2, e)
+plot(acer$CV, e)
+plot(acer$CV2, e)
+plot(acer$R2, e) 
+plot(acer$Relief.mean, e)
+
+#heterogeneity of residuals the only problem. Could fit a dispersion parameter
+#try slightly more simple model with no R2
+mod.fita <- glmmTMB(Survival.Prev/100 ~ Relief.mean +  CV * Sp.rich + CV2 + S2 +
+                 Distance.to.Port + Cluster + Method +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = acer, dispformula = ~CV2)
+
+AIC(mod.fita, mod.fit) #not as good
+
+```
+
+### Assess fitted model
+```{r}
+
+summary(mod.fit)
+r2(mod.fit) #conditional = 0.26, marginal = 0.18
+
+#Survival pred increases with R2, increases with distance from port (but not significantly), increases with relief.mean (until get too high as per random forest)
+#decreases with CV and Sp.rich, CV2, S2
+#significant interaction  Sp.richness and CV
+
+#model formula: y ~ B + B*Relief + B*Port + B*Cluster + B*Method + B*CV + B*R2 +B*CV2 + B*S2 + B*CV x B*Sp.rich + (1|Site) + e 
+
+emm.method <- emmeans(mod.fit, ~ Method, type = "response")
+pairs(emm.method) #cement much better than epoxy (improves odds ratio by 4)
+
+emm.cluster <- emmeans(mod.fit, ~ Cluster, type = "response")
+pairs(emm.cluster) # survival is better not in a cluster (0.23 ratio), but not huge difference
+
+#extract model predictions and plot interaction
+pred.mod <- predict(mod.fit, type = "response")
+pred.df <- data.frame(acer, pred.mod)
+
+library(jtools) 
+library(interactions)
+#https://cran.r-project.org/web/packages/interactions/vignettes/interactions.html
+
+#doesn't like the weights argument so fit this without to test interaction, look at simple model of interactions
+mod.acer.no.w <- glmmTMB(Survival.Prev/100 ~ Relief.mean +  CV * Sp.rich + CV2 + R2 + S2 +
+                 Distance.to.Port + Cluster + Method +
+                   (1|Site), family = binomial, data = pred.df)
+
+mean(pred.df$CV)
+sd(pred.df$CV)
+
+interact.fig <- interactions::interact_plot(mod.acer.no.w, 
+                            pred = Sp.rich, modx = CV, 
+                            data = pred.df, legend.main = "Coefficient of Variation", modx.values = c(17, 22, 27),
+                            modx.labels = c("17 (-1 SD)", "22 (Mean)", "27 (+1 SD)"))+
+  theme(legend.position = c(0.15,0.2),
+        legend.text = element_text(size = 8, colour = "black"),
+      legend.title = element_text(size = 10, colour = "black"),
+        axis.title.y = element_text(size = 12, colour = "black"),
+        axis.text.y = element_text(size = 10, hjust = 1, colour = "black"),  
+        axis.text.x = element_text(size = 10, hjust = 1, colour = "black"),
+        axis.title.x = element_text(size = 12, colour = "black"),
+        axis.line = element_line(colour = "black", size = 0.5), 
+        panel.border =  element_rect(size = 0.5, colour = "black", fill = NA),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        strip.background = element_blank(),
+        strip.text = element_text(size = 12),
+        panel.background = element_blank())+
+    labs(y = bquote('Survival Probability'), x = "Species Richness")
+
+interact.fig
+
+#ggsave(interact.fig, file = "ACER survival prevalence interction.png", width = 7, height = 4, dpi = 300)
+
+
+interactions::interact_plot(mod.acer.no.w, 
+                            pred = CV, modx = Sp.rich, 
+                            data = pred.df)
+#Survival probability increases greatly with CV when sp.richness above average, increases marginally with CV at mean sp.richness, decreases substantially with CV at below mean sp.richness
+#basically when community is variable then survival probability increases with variability in colony size, if sp.richness is low then it decreases with CV
+
+```
+### Forest plot of model
+```{r}
+plot_model(mod.fit, sort.est = T)+
+  theme(legend.position = c(0.15,0.2),
+        legend.text = element_text(size = 8, colour = "black"),
+      legend.title = element_text(size = 10, colour = "black"),
+        axis.title.y = element_text(size = 12, colour = "black"),
+        axis.text.y = element_text(size = 10, hjust = 1, colour = "black"),  
+        axis.text.x = element_text(size = 10, hjust = 1, colour = "black"),
+        axis.title.x = element_text(size = 12, colour = "black"),
+        axis.line = element_line(colour = "black", size = 0.5), 
+        panel.border =  element_rect(size = 0.5, colour = "black", fill = NA),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        strip.background = element_blank(),
+        strip.text = element_text(size = 12),
+        panel.background = element_blank())
+
+#terms = c("Relief.mean", "CV", "Sp.rich", "R2", "CV2", "S2", "Distance.to.Port"))
+#effect size needs to be scaled - the factors have much larger effects in this
+
+
+
+```
+

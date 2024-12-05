@@ -1,0 +1,456 @@
+---
+title: "Acropora cervicornis breakage model"
+author: "Nick Jones"
+date: "2024-05-02"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE)
+```
+
+```{r, include=FALSE}
+library(dplyr)
+library(ggplot2)
+library(plotrix)
+library(tidyverse)
+library(stringr)
+library(moments)
+library(vegan)
+library(randomForest)
+library(varImp)
+library(pdp)
+library(MESS)
+library(glmmTMB)
+library(DHARMa)
+library(emmeans)
+library(performance)
+library(corrplot)
+library(lattice)
+
+```
+
+```{r}
+
+predictors <- read.csv("C:\\Users\\nj350\\OneDrive - Nova Southeastern University\\Documents\\Grants and Funding\\2023\\FY 24 DEP Restoration Hub\\Data\\Site Data\\All Predictors.csv", header = T)
+
+breakage <- read.csv("C:\\Users\\nj350\\OneDrive - Nova Southeastern University\\Documents\\Grants and Funding\\2023\\FY 24 DEP Restoration Hub\\Data\\Outplant Data\\Data Summaries\\Array Breakage Prevalence.csv", header = T)
+
+grid <- read.csv("C:\\Users\\nj350\\OneDrive - Nova Southeastern University\\Documents\\Grants and Funding\\2023\\FY 24 DEP Restoration Hub\\Data\\Outplant Data\\Data Summaries\\Grid Breakage Prevalence.csv", header = T)
+
+```
+
+### Data manipulation for analysis
+
+```{r}
+
+predictors$Site <- as.factor(predictors$Site)
+breakage$Site <- as.factor(breakage$Site)
+grid$Site <- as.factor(grid$Site)
+
+breakage$Array <- as.factor(breakage$Array)
+grid$Array <- as.factor(grid$Array)
+
+breakage$Species <- as.factor(breakage$Species)
+grid$Species <- as.factor(grid$Species)
+
+breakage <- rbind(breakage, grid)
+
+breakage.site <- left_join(predictors, breakage, by = c("Site", "Array"))
+breakage.site$Array <- as.factor(breakage.site$Array)
+
+#remove arrays with no acer, note G16 a Exp5 gets removed because it was an experimental site so didn't get included in this analysis
+breakage.site <- na.omit(breakage.site)
+
+###remove collinear variables - mean length and kurtosis
+
+breakage.site <- breakage.site %>%
+  select(c(-17,-19))
+
+```
+
+### Data analysis in 2 stage process - first random forest, then GLMM using most important variables
+### Random Forest analysis - ACER breakage within year 1
+
+```{r}
+
+all.pred <- predictors %>%
+  select(c(5, 10:28))
+
+#check if correlation coefficient over 90 and remove one of the collinear variables
+M <- cor(all.pred, method = "spearman") #spearman good for non-normal data with outliers
+#remove LONDD (collinear with LatDD), mean.length (collinear with CV), kurtosis (collinear with skew)
+corrplot(M, method = 'number')
+
+```
+
+```{r}
+
+breakage.site$Method <- as.factor(breakage.site$Method)
+breakage.site$Cluster <- as.factor(breakage.site$Cluster)
+
+set.seed(1985)
+
+forest.full <- randomForest(Breakage.Prev ~ n.x + Acer + Skew + CV + H + J + Sp.rich + 
+                           Rugosity + Sed.max + Sed.mean + Relief.max + Relief.mean +
+                           Distance.to.Shore + LatDD + Distance.to.Port + Depth + Cluster + Method,
+                         data = breakage.site, importance = T,
+                         replace = T, ntree = 500)
+
+round(importance(forest.full),2)
+plot(forest.full) #displays cross validation error rate against the number of trees to assess whether the forest is reliable
+print(forest.full) #too complex - need to simplify, performed stepwise regression to find optimal starting model
+
+set.seed(1985)
+forest.1 <- randomForest(Breakage.Prev ~ n.x + J +  
+                           Relief.max + LatDD,
+                         data = breakage.site, importance = T,
+                         replace = T, ntree = 500)
+
+round(importance(forest.1),2)
+plot(forest.1) #displays cross validation error rate against the number of trees to assess whether the forest is reliable
+print(forest.1) #better but not accounting for much variation - 3.27%
+
+#breakage predictions of the random forest at each array based upon model
+p.rf <- predict(forest.1, newdata=breakage.site)
+length(unique(p.rf))
+
+#calculate the root mean squared error using the out of bag predictions- how far predicted values are from observed values in the regression analysis (how concentrated the data are around line of best fit)
+#summarises how different the fitted predictions are with the actual data, quantiles and extremes are - rpp cntains each data point comparison
+summary(r.rpp <- breakage.site$Breakage.Prev - p.rf) #mean is good, extremes off
+
+rmse.rf <- sqrt(sum(r.rpp^2)/length(r.rpp)) #sqrt of the sum of squareds/length
+
+summary(breakage.site$Breakage.Prev)
+summary(p.rf) #model isn't great - high values, mean and median quite a way off
+
+#Plot predicted vs actual values
+ggplot(breakage.site, aes(x = Breakage.Prev, y = p.rf)) +
+         geom_point() +
+  geom_abline()+
+         labs(x = "Actual", y = "Fitted")+
+         scale_y_continuous(limits = c(0,50))+
+         scale_x_continuous(limits = c(0,50)) #a little off but reasonably consistent, underestimates mortality at high values in particular
+
+set.seed(2509)
+forest.2 <- randomForest(Breakage.Prev ~ n.x + J +  
+                           Relief.max + LatDD,
+                         data = breakage.site, importance = T,
+                         replace = T, ntree = 1000)
+
+round(importance(forest.2),2)
+print(forest.2)
+
+p.rf2 <- predict(forest.2, newdata=breakage.site)
+length(unique(p.rf))
+
+summary(r.rpp <- breakage.site$Breakage.Prev - p.rf)
+
+ggplot(breakage.site, aes(x = Breakage.Prev, y = p.rf2)) +
+         geom_point(aes(colour = Site)) +
+  geom_abline()+
+         labs(x = "Actual", y = "Fitted")+
+         scale_y_continuous(limits = c(0,50))+
+         scale_x_continuous(limits = c(0,50)) #south commercial and north hub get a lot more breakage than you'd expect
+
+```
+
+### Extract Variable Importance
+
+```{r}
+
+#extracts variable importance
+imp1 <- as.data.frame(round(importance(forest.1), 2)) #extracts variable importance
+imp1$Var.Names <- row.names(imp1)
+imp2 <- as.data.frame(round(importance(forest.2), 2))
+imp2$Var.Names <- row.names(imp2)
+importance <- full_join(imp1, imp2, by = "Var.Names") #joins var importance from both models
+names(importance) <- c("Imp1", "Node.1", "Var.Names", "Imp2", "Node.2")
+importance$Imp <- (importance$Imp1+importance$Imp2)/2
+importance.order <- importance[order(-importance$Imp),] #orders variable importance 
+cumsumbinning(importance.order$Imp, threshold = (sum(importance$Imp)*0.75), cutwhenpassed = T) #use first 6 variables
+#looks at cutoffs at 75% total variable importance explained (e.g. vars with a 1 are in the top 75%, 2 and above are less important)
+importance.order
+mean(forest.1$mse) 
+sum(importance$Imp)
+
+#so R2 not high but we're looking to identify the most important variables
+
+ggplot(importance, aes(x=Var.Names,  y=Imp)) +
+  geom_segment(aes(x=reorder(Var.Names,Imp), xend=Var.Names, y=0, yend=Imp), color="grey") +
+  geom_point(aes(color=Imp), size = 5) +
+  labs(y = bquote("%IncMSE"))+
+  theme_light() +
+  coord_flip()+
+  theme_classic()+
+  theme(axis.text.y = element_text(size = 12, colour = "black"), 
+        axis.title.y = element_blank(), 
+        axis.text.x = element_text(size = 12, colour = "black"), 
+        axis.title.x = element_text(size = 14),
+        axis.line = element_line(linewidth = 1), 
+        axis.ticks = element_blank(),legend.position="")+
+  scale_color_continuous(type= "viridis")+
+  scale_x_discrete(labels = c("Max relief height","Latitude",
+                               "Wild coral abundance",  
+                               "Evenness (J)"))
+
+#ggsave(file = "ACER breakage var imp.png", width = 7, height = 4, dpi = 300) 
+#J, n.x, Relief Max
+
+```
+
+### Re-run with the chosen variables that account for 75% of variation
+```{r}
+
+set.seed(25091985)
+
+forest.3 <- randomForest(Breakage.Prev ~ n.x + J +  
+                           Relief.max,
+                         data = breakage.site, importance = T,
+                         replace = T, ntree = 1000) 
+
+round(importance(forest.3),2)
+print(forest.3) #explains 3.17% variation
+
+p.rf3 <- predict(forest.3, newdata=breakage.site)
+summary(r.rpp <- breakage.site$Breakage.Prev - p.rf3) #extreme values off but mean is close and 1st and 3rd quantiles close
+
+ggplot(breakage.site, aes(x = Breakage.Prev, y = p.rf3)) +
+         geom_point(aes(colour = Site)) +
+  geom_abline()+
+         labs(x = "Actual", y = "Fitted")+
+         scale_y_continuous(limits = c(0,50))+
+         scale_x_continuous(limits = c(0,50)) #looks about the same in terms of accuracy
+
+imp3 <- as.data.frame(round(importance(forest.3), 2))
+imp3$Var.Names <- row.names(imp3)
+names(imp3) <- c("Imp", "Node.3", "Var.Names")
+
+ggplot(imp3, aes(x=Var.Names,  y=Imp)) +
+  geom_segment(aes(x=reorder(Var.Names,Imp), xend=Var.Names, y=0, yend=Imp), color="grey") +
+  geom_point(aes(color=Imp), size = 5) +
+  labs(y = bquote("%IncMSE"))+
+  theme_light() +
+  coord_flip()+
+  theme_classic()+
+  theme(axis.text.y = element_text(size = 12, colour = "black"), 
+        axis.title.y = element_blank(), 
+        axis.text.x = element_text(size = 12, colour = "black"), 
+        axis.title.x = element_text(size = 14),
+        axis.line = element_line(linewidth = 1), 
+        axis.ticks = element_blank(),legend.position="")+
+  scale_color_continuous(type= "viridis") 
+```
+
+### Extract those main variables and look at relationship with breakage
+
+```{r}
+
+break.J <- forest.3 %>%  # the %>% operator is read as "and then"
+  partial(pred.var = "J", plot.engine = "ggplot2") %>%
+  plotPartial(smooth = TRUE, lwd = 2, ylab = expression(Breakage))
+ # increasing breakage with evenness
+break.J
+
+break.n <- forest.3 %>%  # the %>% operator is read as "and then"
+  partial(pred.var = "n.x", plot.engine = "ggplot2") %>%
+  plotPartial(smooth = TRUE, lwd = 2, ylab = expression(Breakage))
+ # increase with number of colonies
+break.n 
+
+break.Relief <- forest.3 %>%  # the %>% operator is read as "and then"
+  partial(pred.var = "Relief.max", plot.engine = "ggplot2") %>%
+  plotPartial(smooth = TRUE, lwd = 2, ylab = expression(Breakage))
+ 
+break.Relief #high at low max relief, very low at moderate max relief
+
+```
+
+### GLMM of ACER breakage using the most important variables to fit model (inc interactions) and then make an equation that predicts survival prevalence
+##### From random forest evidence of quadratic relationship between breakage prev and relief max in particular
+
+```{r, results='hide'}
+
+hist(breakage.site$Breakage.Prev)
+
+breakage.site$R2 <- (breakage.site$Relief.max - mean(breakage.site$Relief.max))^2 #quadratic and centred CV
+breakage.site$n2 <- (breakage.site$n.x - mean(breakage.site$n.x))^2 #quadratic and centred CV
+
+#starting model - use interactions that think may be meaningful e.g., H:CV + H:Relief.mean - the spatial factors and outplanting methods are in as covariates
+mod.1 <- glmmTMB(Breakage.Prev/100 ~ Relief.max + n.x + J + J:n.x + J:Relief.max + n.x:Relief.max + R2 + n2 +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = breakage.site)
+summary(mod.1)
+
+mod.2 <- glmmTMB(Breakage.Prev/100 ~ Relief.max + J + J + n.x + R2 +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = breakage.site)
+summary(mod.2)
+
+AIC(mod.1, mod.2)
+
+mod.3 <- glmmTMB(Breakage.Prev/100 ~ Relief.max + n.x + J * n.x + R2 +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = breakage.site)
+summary(mod.3)
+
+mod.4 <- glmmTMB(Breakage.Prev/100 ~ Relief.max + n.x + J + n2 + J:Relief.max + R2 +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = breakage.site)
+summary(mod.4)
+
+mod.5 <- glmmTMB(Breakage.Prev/100 ~ n.x + n2 + J * n.x +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = breakage.site)
+
+mod.6 <- glmmTMB(Breakage.Prev/100 ~ n.x + J + n2 + 
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = breakage.site)
+
+mod.7 <- glmmTMB(Breakage.Prev/100 ~ Relief.max + J * Relief.max + R2 +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = breakage.site)
+
+mod.8 <- glmmTMB(Breakage.Prev/100 ~ Relief.max + J + R2 +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = breakage.site)
+
+mod.9 <- glmmTMB(Breakage.Prev/100 ~ Relief.max + R2 +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = breakage.site)
+
+mod.10 <- glmmTMB(Breakage.Prev/100 ~ Relief.max + n.x + n2 + R2 + n.x:Relief.max +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = breakage.site)
+
+summary(mod.10)
+
+mod.11 <- glmmTMB(Breakage.Prev/100 ~ Relief.max + n.x + n2 + R2 +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = breakage.site)
+
+mod.12 <- glmmTMB(Breakage.Prev/100 ~ n.x + n2+
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = breakage.site)
+
+mod.13 <- glmmTMB(Breakage.Prev/100 ~ J +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = breakage.site)
+
+AIC(mod.1, mod.2, mod.3, mod.4, mod.5, mod.6, mod.7, mod.8, mod.9, mod.10, mod.11, mod.12, mod.13)
+#mod.3 best
+summary(mod.3)
+
+mod.3a <- glmmTMB(Breakage.Prev/100 ~ Relief.max + n.x + J * n.x + R2 +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = breakage.site)
+
+AIC(mod.3, mod.3a)
+#best model is Relief.max, colony abundance, Pielou J * colony abundance
+
+summary(mod.3a)
+
+```
+
+### Fitted model - Breakage
+
+```{r}
+
+break.mod <- glmmTMB(Breakage.Prev/100 ~Relief.max + n.x + J * n.x + R2 +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = breakage.site)
+
+sims1 <- simulateResiduals(break.mod, n = 1000)
+plot(sims1) #model fit is good
+
+e <- resid(break.mod)
+plot(breakage.site$Relief.max, e)
+plot(breakage.site$n.x, e)
+plot(breakage.site$J, e)
+plot(breakage.site$R2, e)  #the variable with very high relief, looks like an outlier so remove and refit
+
+### remove outlier relief
+
+breakage.site2 <- subset(breakage.site, Relief.max < 100)
+
+break.mod2 <- glmmTMB(Breakage.Prev/100 ~ n.x + J * n.x + R2 +
+                   (1|Site), 
+                 weights = Initial.n, family = binomial, data = breakage.site2)
+summary(break.mod2)
+sims1 <- simulateResiduals(break.mod2, n = 1000)
+plot(sims1) #model fit is good
+
+e <- resid(break.mod2)
+plot(breakage.site2$n.x, e)
+plot(breakage.site2$J, e)
+plot(breakage.site2$R2, e)
+
+summary(break.mod2)
+
+r2(break.mod2) ##conditional R2 = 0.13, marginal = 0.03 - so not very high
+
+library(jtools) 
+
+#extract model predictions and plot interaction
+pred.mod <- predict(break.mod2, type = "response")
+pred.df <- data.frame(breakage.site2, pred.mod)
+
+ggplot(pred.df, aes(x = R2, y = Breakage.Prev))+
+  geom_smooth()+
+  geom_point(aes(size = pred.mod))
+
+#https://cran.r-project.org/web/packages/interactions/vignettes/interactions.html
+
+#doesn't like the weights argument so fit this without to test interaction
+break.mod.no.w <- glmmTMB(Breakage.Prev/100 ~ n.x + J * n.x + R2 +
+                   (1|Site), family = binomial, data = pred.df)
+
+mean(pred.df$J)
+sd(pred.df$J)
+
+interact.fig <- interact_plot(break.mod.no.w, pred = n.x, modx = J, data = pred.df,
+              modx.values = c(0.6, 0.7, 0.8),
+                            modx.labels = c("0.6 (-1 SD)", "0.7 (Mean)", "0.8 (+1 SD)"))+
+    theme(legend.position = c(0.15,0.8),
+        legend.text = element_text(size = 8, colour = "black"),
+      legend.title = element_text(size = 10, colour = "black"),
+        axis.title.y = element_text(size = 12, colour = "black"),
+        axis.text.y = element_text(size = 10, hjust = 1, colour = "black"),  
+        axis.text.x = element_text(size = 10, hjust = 1, colour = "black"),
+        axis.title.x = element_text(size = 12, colour = "black"),
+        axis.line = element_line(colour = "black", size = 0.5), 
+        panel.border =  element_rect(size = 0.5, colour = "black", fill = NA),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        strip.background = element_blank(),
+        strip.text = element_text(size = 12),
+        panel.background = element_blank())+
+    labs(y = bquote('Breakage Probability'), x = "Colony Abundance")
+#increase in breakage with n.x, when J is above average becomes exponential increase 
+
+interact.fig
+
+#ggsave(interact.fig, file = "Breakage survival prevalence interaction.png", width = 7, height = 4, dpi = 300)
+
+interact_plot(break.mod.no.w, pred = J, modx = n.x, data = pred.df)
+
+```
+
+### Forest plot of model
+```{r}
+plot_model(break.mod2, sort.est = T)+
+  theme(legend.position = c(0.15,0.2),
+        legend.text = element_text(size = 8, colour = "black"),
+      legend.title = element_text(size = 10, colour = "black"),
+        axis.title.y = element_text(size = 12, colour = "black"),
+        axis.text.y = element_text(size = 10, hjust = 1, colour = "black"),  
+        axis.text.x = element_text(size = 10, hjust = 1, colour = "black"),
+        axis.title.x = element_text(size = 12, colour = "black"),
+        axis.line = element_line(colour = "black", size = 0.5), 
+        panel.border =  element_rect(size = 0.5, colour = "black", fill = NA),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        strip.background = element_blank(),
+        strip.text = element_text(size = 12),
+        panel.background = element_blank())
+
+```

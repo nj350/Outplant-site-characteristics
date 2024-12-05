@@ -1,0 +1,25 @@
+Species,Site,Array,Period,Initial.n,n,Survival.Prev
+OFAV,Staghorn City,X30,0 Year,140,140,1
+PCLI,Staghorn City,X30,0 Year,55,55,1
+MCAV,Staghorn City,X30,0 Year,45,45,1
+OFAV,North Hub,X28,0 Year,150,150,1
+PCLI,North Hub,X28,0 Year,60,60,1
+MCAV,North Hub,X28,0 Year,45,45,1
+OFAV,Experimental 1,X27,0 Year,135,135,1
+PCLI,Experimental 1,X27,0 Year,70,70,1
+MCAV,Experimental 1,X27,0 Year,50,50,1
+OFAV,South Hub,X29,0 Year,130,130,1
+PCLI,South Hub,X29,0 Year,60,60,1
+MCAV,South Hub,X29,0 Year,50,50,1
+OFAV,Staghorn City,X30,1 Year,140,76,0.54
+PCLI,Staghorn City,X30,1 Year,55,48,0.87
+MCAV,Staghorn City,X30,1 Year,45,42,0.93
+OFAV,North Hub,X28,1 Year,150,101,0.67
+PCLI,North Hub,X28,1 Year,60,34,0.57
+MCAV,North Hub,X28,1 Year,45,29,0.64
+OFAV,Experimental 1,X27,1 Year,135,85,0.63
+PCLI,Experimental 1,X27,1 Year,70,43,0.61
+MCAV,Experimental 1,X27,1 Year,50,35,0.7
+OFAV,South Hub,X29,1 Year,130,84,0.65
+PCLI,South Hub,X29,1 Year,60,22,0.37
+MCAV,South Hub,X29,1 Year,50,12,0.24
